@@ -420,6 +420,62 @@ test('#51: detect() reports posix for a host that answers uname, and Windows for
   assert.equal(winPool.shellMode, 'git-bash')
 })
 
+test('#51: native pool detects an active Git Bash shell and retains cmd.exe fallback', async () => {
+  const gitPool = new SshPool(baseConfig())
+  gitPool._execRaw = async (cmd) => {
+    if (cmd === 'printf __DSH_BASH__') return { code: 0, stdout: '__DSH_BASH__', stderr: '' }
+    if (cmd === 'uname -s') return { code: 0, stdout: 'MSYS_NT-10.0', stderr: '' }
+    assert.fail(`unexpected Git Bash fallback command: ${cmd}`)
+  }
+  await gitPool.detect()
+  assert.equal(gitPool.platform, 'windows')
+  assert.equal(gitPool.gitBashPath, '/usr/bin/bash')
+  assert.equal(gitPool.shellMode, 'git-bash')
+  const seen = []
+  gitPool._execRaw = async (cmd, opts, stdinWriter) => {
+    seen.push({ cmd, opts, stdinWriter })
+    return { code: 0, stdout: 'ok', stderr: '' }
+  }
+  await gitPool.exec("printf '%s' ok")
+  assert.equal(seen[0].cmd, '/usr/bin/bash -s')
+
+  const winPool = new SshPool(baseConfig())
+  winPool._execRaw = async (cmd) => {
+    if (cmd === 'printf __DSH_BASH__') return { code: 127, stdout: '', stderr: "'printf' is not recognized" }
+    if (cmd === 'cmd /c ver') return { code: 0, stdout: 'Microsoft Windows [Version 10.0]\r\n', stderr: '' }
+    if (cmd === 'cmd /c where bash') return { code: 0, stdout: 'C:\\Program Files\\Git\\bin\\bash.exe\r\n', stderr: '' }
+    assert.fail(`unexpected Windows fallback command: ${cmd}`)
+  }
+  await winPool.detect()
+  assert.equal(winPool.platform, 'windows')
+  assert.equal(winPool.gitBashPath, 'C:\\Program Files\\Git\\bin\\bash.exe')
+  assert.equal(winPool.shellMode, 'git-bash')
+})
+
+test('#51: detect uses /usr/bin/bash when Git Bash is already the OpenSSH shell', async () => {
+  const pool = new SystemOpenSshPool(baseConfig())
+  const seen = []
+  pool._runSsh = async (args) => {
+    const cmd = args[args.length - 1]
+    seen.push(cmd)
+    if (cmd === 'printf __DSH_BASH__') return { code: 0, stdout: '__DSH_BASH__', stderr: '' }
+    if (cmd === 'uname -s') return { code: 0, stdout: 'MINGW64_NT-10.0', stderr: '' }
+    assert.fail(`unexpected fallback command: ${cmd}`)
+  }
+  await pool.detect()
+  assert.equal(pool.platform, 'windows')
+  assert.equal(pool.gitBashPath, '/usr/bin/bash')
+  assert.equal(pool.shellMode, 'git-bash')
+  assert.deepEqual(seen, ['printf __DSH_BASH__', 'uname -s'])
+
+  const script = "printf '%s' \"a && b\""
+  const calls = []
+  pool._runSsh = async (args, opts) => { calls.push({ args, opts }); return { code: 0, stdout: 'ok', stderr: '' } }
+  await pool.exec(script)
+  assert.equal(calls[0].args[calls[0].args.length - 1], '/usr/bin/bash -s')
+  assert.equal(calls[0].opts.stdin, script)
+})
+
 test('#51: exec pipes the script to bash -s on a Git-Bash remote (no quoting round-trip)', async () => {
   const pool = new SystemOpenSshPool(baseConfig())
   pool.platform = 'windows'
